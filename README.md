@@ -1,7 +1,7 @@
 # Hash Sherlock
 Search for hashes that match your criteria.
 
-![Screenshot of HashSherlock](https://raw.githubusercontent.com/Mondei1/HashSherlock/main/img/showcase.png)
+![Screenshot of HashSherlock](https://raw.githubusercontent.com/Mondei1/HashSherlock/master/img/showcase.png)
 
 ## Important
 This project is small and is just my playground to explore Rust, `egui` and multithreading.
