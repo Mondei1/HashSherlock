@@ -3,18 +3,24 @@ use std::{
     time::Duration,
 };
 
-use egui::{panel::Side, Button, Color32, ComboBox, DragValue, RichText, TextEdit, TextStyle};
+use egui::{panel::Side, Button, Color32, ComboBox, DragValue, RichText, TextEdit};
 use egui_extras::{Column, TableBuilder};
 use num_format::{Locale, ToFormattedString};
 use sysinfo::{System, SystemExt, CpuExt};
 
-use crate::{Application, HashAlgorithm};
+use crate::{Application, HashAlgorithm, visualizations::table::TableVisualization};
+
+pub enum Visualization {
+    Table,
+    Graph
+}
 
 pub struct HashSherlockUI {
     application: Arc<Mutex<Application>>,
     algorithm: HashAlgorithm,
     cpu_name: String,
-    cpu_freq: u64
+    cpu_freq: u64,
+    visualization: Visualization
 }
 
 impl HashSherlockUI {
@@ -23,7 +29,8 @@ impl HashSherlockUI {
             application,
             algorithm: HashAlgorithm::SHA256,
             cpu_name,
-            cpu_freq
+            cpu_freq,
+            visualization: Visualization::Table
         }
     }
 }
@@ -65,7 +72,6 @@ impl eframe::App for HashSherlockUI {
 
         ctx.set_pixels_per_point(1.0);
 
-        ctx.request_repaint_after(Duration::from_millis(16));
         egui::CentralPanel::default().show(ctx, |ui| {
 
             /*
@@ -221,6 +227,19 @@ impl eframe::App for HashSherlockUI {
                 });
             });
 
+            // Context menu
+            ui.horizontal(|ui| {
+                ui.menu_button("Visualization", |ui| {
+                    if ui.button("Table (default)").clicked() {
+
+                    }
+
+                    if ui.button("Graph").clicked() {
+                        
+                    }
+                });
+            });
+
             /*
              * Table
              */
@@ -234,63 +253,15 @@ impl eframe::App for HashSherlockUI {
                     });
                 });
             } else {
-                ui.vertical(|ui| {
-                    ui.vertical(|ui| {
-                        egui::ScrollArea::horizontal().show(ui, |ui| {
-                            let table = TableBuilder::new(ui)
-                                .striped(true)
-                                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                                .column(Column::initial(16.0))    // Thread
-                                .column(Column::auto())                 // Iteration
-                                .column(Column::auto())                 // Time
-                                .column(Column::initial(256.0))   // Hash
-                                .column(Column::remainder())   // Nonce
-                                .min_scrolled_height(0.0)
-                                .stick_to_bottom(true);
-
-                            table.header(20.0, |mut header| {
-                                header.col(|ui| {
-                                    ui.strong("# Thread");
-                                });
-                                header.col(|ui| {
-                                    ui.strong("# Iteration");
-                                });
-                                header.col(|ui| {
-                                    ui.strong("Time");
-                                });
-                                header.col(|ui| {
-                                    ui.strong("Hash");
-                                });
-                                header.col(|ui| {
-                                    ui.strong("Nonce");
-                                });
-                            })
-                            .body(|mut body| {
-                                for result in app.results() {
-                                    body.row(16.0, |mut row| {
-                                        row.col(|ui| { ui.label(result.thread.to_string()); });
-                                        row.col(|ui| { ui.label(result.iteration.to_formatted_string(&Locale::en)); });
-                                        row.col(|ui| { ui.label(result.time.format("%H:%M:%S%.3f").to_string()); });
-                                        row.col(|ui| {
-                                            let white_hash = RichText::new(result.hash)
-                                                .color(Color32::WHITE)
-                                                .text_style(TextStyle::Monospace);
-
-                                            let _= ui.label(white_hash);
-                                        });
-
-                                        row.col(|ui| {
-                                            let monospace_nonce = RichText::new(result.nonce)
-                                                .text_style(TextStyle::Monospace);
-
-                                            ui.label(monospace_nonce);
-                                        });
-                                    });
-                                }
-                            });
-                        });
-                    });
-                });
+                match self.visualization {
+                    Visualization::Table => {
+                        TableVisualization::new(ui, app)
+                            .show();
+                    },
+                    _ => {
+                        ui.label("You got me! This visualization isn't implemented yet.");
+                    }
+                }
             }
         });
     }

@@ -1,3 +1,28 @@
+/*
+    MIT License
+
+    Copyright (c) 2023 Nicolas Klier
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+*/
+
+
 use std::{
     fmt::{Display, Formatter, Result},
     sync::{Arc, Mutex},
@@ -11,6 +36,7 @@ use rand::{distributions::Alphanumeric, Rng};
 use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY, SHA256, SHA384, SHA512};
 
 mod ui;
+mod visualizations;
 
 #[derive(Debug, Clone)]
 pub struct HashResult {
@@ -87,8 +113,23 @@ impl Application {
 
             match thread_builder.spawn(move || {
                 let mut iteration: u64 = 0;
+                let mut nonce_iteration: u32 = 0;
                 let mut last_speed_check = SystemTime::now();
                 let mut last_speed_iteration: u64 = 0;
+
+                let alg = match alg_clone {
+                    HashAlgorithm::SHA1 => &SHA1_FOR_LEGACY_USE_ONLY,
+                    HashAlgorithm::SHA256 => &SHA256,
+                    HashAlgorithm::SHA384 => &SHA384,
+                    HashAlgorithm::SHA512 => &SHA512,
+                };
+
+                let mut context = Context::new(alg);
+                let mut nonce: String = rand::thread_rng()
+                    .sample_iter(&Alphanumeric)
+                    .take(nonce_length_clone)
+                    .map(char::from)
+                    .collect();
 
                 loop {
                     if *stopping_clone.lock().unwrap() {
@@ -105,26 +146,25 @@ impl Application {
                         last_speed_iteration = iteration;
                     }
 
-                    let alg = match alg_clone {
-                        HashAlgorithm::SHA1 => &SHA1_FOR_LEGACY_USE_ONLY,
-                        HashAlgorithm::SHA256 => &SHA256,
-                        HashAlgorithm::SHA384 => &SHA384,
-                        HashAlgorithm::SHA512 => &SHA512,
-                    };
-
-                    let mut context = Context::new(alg);
-
                     iteration += 1;
+                    nonce_iteration += 1;
 
-                    let nonce: String = rand::thread_rng()
-                        .sample_iter(&Alphanumeric)
-                        .take(nonce_length_clone)
-                        .map(char::from)
-                        .collect();
+                    // Only switch nonce after 1 million operations because generating a new nonce
+                    // for every operation is quite heavy. This gives us ~0,3 MH/s more.
+                    if nonce_iteration > 1_000_000 {
+                        nonce = rand::thread_rng()
+                            .sample_iter(&Alphanumeric)
+                            .take(nonce_length_clone)
+                            .map(char::from)
+                            .collect();
 
-                    context.update(nonce.as_bytes());
+                        nonce_iteration = 0;
+                    }
 
-                    let digest = context.finish();
+                    let value = format!("{}{}", nonce, nonce_iteration);
+                    context.update(value.as_bytes());
+
+                    let digest = context.clone().finish();
                     let raw_result = digest.as_ref();
                     let hash = hex::encode(raw_result);
 
@@ -134,7 +174,7 @@ impl Application {
                             iteration,
                             thread: i,
                             hash,
-                            nonce,
+                            nonce: value,
                             time: Utc::now(),
                         })
                     }
@@ -162,6 +202,7 @@ impl Application {
 
         let _ = &self.worker.clear();
         *self.stopping.lock().unwrap() = false;
+        self.speeds.lock().unwrap().clear();
 
         true
     }
