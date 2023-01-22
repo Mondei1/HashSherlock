@@ -22,7 +22,6 @@
     SOFTWARE.
 */
 
-
 use std::{
     fmt::{Display, Formatter, Result},
     sync::{Arc, Mutex},
@@ -30,21 +29,30 @@ use std::{
     time::SystemTime,
 };
 
+use base64::{engine::general_purpose, Engine as _};
 use chrono::Utc;
+use ed25519_dalek::PublicKey;
 use eframe::epaint::ahash::{HashMap, HashMapExt};
-use rand::{distributions::Alphanumeric, Rng};
+use opencl::init_opencl;
+use rand::{distributions::Alphanumeric, Rng, RngCore};
 use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY, SHA256, SHA384, SHA512};
 
+mod opencl;
 mod ui;
 mod visualizations;
 
 #[derive(Debug, Clone)]
-pub struct HashResult {
+pub struct IterationResult {
     iteration: u64,
     thread: usize,
-    hash: String,
+
+    /// This may be a hash or a public key
+    value: String,
     nonce: String,
     time: chrono::DateTime<Utc>,
+
+    /// Private/Public key exclusive
+    private_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +61,7 @@ pub enum HashAlgorithm {
     SHA256,
     SHA384,
     SHA512,
+    ED25519,
 }
 
 impl Display for HashAlgorithm {
@@ -62,19 +71,25 @@ impl Display for HashAlgorithm {
             HashAlgorithm::SHA256 => write!(f, "SHA-256"),
             HashAlgorithm::SHA384 => write!(f, "SHA-384"),
             HashAlgorithm::SHA512 => write!(f, "SHA-512"),
+            HashAlgorithm::ED25519 => write!(f, "Ed25519"),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct Task {
+    pub worker: Vec<Arc<JoinHandle<()>>>,
+    pub hashs: Arc<Mutex<Vec<IterationResult>>>,
+    pub speeds: Arc<Mutex<HashMap<usize, u64>>>,
+    pub stopping: Arc<Mutex<bool>>,
+    pub current_algorithm: Option<HashAlgorithm>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Application {
     pub target_beginning: String,
     pub nonce_length: usize,
-
-    worker: Vec<Arc<JoinHandle<()>>>,
-    hashs: Arc<Mutex<Vec<HashResult>>>,
-    speeds: Arc<Mutex<HashMap<usize, u64>>>,
-    stopping: Arc<Mutex<bool>>,
+    pub task: Task,
 }
 
 impl Default for Application {
@@ -82,10 +97,14 @@ impl Default for Application {
         Self {
             target_beginning: String::from("00000"),
             nonce_length: 16,
-            worker: Vec::new(),
-            hashs: Arc::new(Mutex::new(Vec::new())),
-            speeds: Arc::new(Mutex::new(HashMap::new())),
-            stopping: Arc::new(Mutex::new(false)),
+
+            task: Task {
+                worker: Vec::new(),
+                hashs: Arc::new(Mutex::new(Vec::new())),
+                speeds: Arc::new(Mutex::new(HashMap::new())),
+                stopping: Arc::new(Mutex::new(false)),
+                current_algorithm: None,
+            },
         }
     }
 }
@@ -98,15 +117,17 @@ impl Application {
             thread_count
         );
 
+        self.task.current_algorithm = Some(algorithm.clone());
+
         for i in 0..thread_count {
             let thread_builder =
                 thread::Builder::new().name(format!("Hash Sherlock worker #{}", i));
 
             // We need to clone a lot of things. But we only copy the Arc (increasing reference coung)
             // and not the actual value.
-            let hash_clone = self.hashs.clone();
-            let speeds_clone = self.speeds.clone();
-            let stopping_clone = self.stopping.clone();
+            let hash_clone = self.task.hashs.clone();
+            let speeds_clone = self.task.speeds.clone();
+            let stopping_clone = self.task.stopping.clone();
             let nonce_length_clone = self.nonce_length.clone();
             let beginning_clone = self.target_beginning.clone();
             let alg_clone = algorithm.clone();
@@ -117,19 +138,13 @@ impl Application {
                 let mut last_speed_check = SystemTime::now();
                 let mut last_speed_iteration: u64 = 0;
 
-                let alg = match alg_clone {
-                    HashAlgorithm::SHA1 => &SHA1_FOR_LEGACY_USE_ONLY,
-                    HashAlgorithm::SHA256 => &SHA256,
-                    HashAlgorithm::SHA384 => &SHA384,
-                    HashAlgorithm::SHA512 => &SHA512,
-                };
-
-                let mut context = Context::new(alg);
                 let mut nonce: String = rand::thread_rng()
                     .sample_iter(&Alphanumeric)
                     .take(nonce_length_clone)
                     .map(char::from)
                     .collect();
+
+                let mut rng = rand::thread_rng();
 
                 loop {
                     if *stopping_clone.lock().unwrap() {
@@ -149,33 +164,61 @@ impl Application {
                     iteration += 1;
                     nonce_iteration += 1;
 
-                    // Only switch nonce after 1 million operations because generating a new nonce
-                    // for every operation is quite heavy. This gives us ~0,3 MH/s more.
-                    if nonce_iteration > 1_000_000 {
-                        nonce = rand::thread_rng()
-                            .sample_iter(&Alphanumeric)
-                            .take(nonce_length_clone)
-                            .map(char::from)
-                            .collect();
-
-                        nonce_iteration = 0;
-                    }
-
                     let value = format!("{}{}", nonce, nonce_iteration);
-                    context.update(value.as_bytes());
+                    let hash: String;
+                    let mut private_key: Option<String> = None;
 
-                    let digest = context.clone().finish();
-                    let raw_result = digest.as_ref();
-                    let hash = hex::encode(raw_result);
+                    if alg_clone == HashAlgorithm::ED25519 {
+                        let mut bytes = [0u8; 32];
+                        rng.fill_bytes(&mut bytes);
+
+                        let secret =
+                            ed25519_dalek::SecretKey::from_bytes(&bytes).expect("Invalid length");
+                        let public: PublicKey = (&secret).into();
+
+                        hash = general_purpose::STANDARD.encode(public.as_bytes());
+                        private_key = Some(general_purpose::STANDARD.encode(secret.as_bytes()));
+                    } else {
+                        // Only switch nonce after 1 million operations because generating a new nonce
+                        // for every operation is quite heavy. This gives us ~0,3 MH/s more.
+                        if nonce_iteration > 1_000_000 {
+                            nonce = rand::thread_rng()
+                                .sample_iter(&Alphanumeric)
+                                .take(nonce_length_clone)
+                                .map(char::from)
+                                .collect();
+
+                            nonce_iteration = 0;
+                        }
+
+                        let alg = match alg_clone {
+                            HashAlgorithm::SHA1 => &SHA1_FOR_LEGACY_USE_ONLY,
+                            HashAlgorithm::SHA256 => &SHA256,
+                            HashAlgorithm::SHA384 => &SHA384,
+                            HashAlgorithm::SHA512 => &SHA512,
+                            _ => {
+                                return;
+                            }
+                        };
+
+                        let mut context = Context::new(alg);
+
+                        context.update(value.as_bytes());
+
+                        let digest = context.clone().finish();
+                        let raw_result = digest.as_ref();
+                        hash = hex::encode(raw_result);
+                    }
 
                     if hash.starts_with(&beginning_clone) {
                         println!("Thread (#{}): Found hash {}", i, hash);
-                        hash_clone.lock().unwrap().push(HashResult {
+                        hash_clone.lock().unwrap().push(IterationResult {
                             iteration,
                             thread: i,
-                            hash,
+                            value: hash,
                             nonce: value,
                             time: Utc::now(),
+                            private_key,
                         })
                     }
                 }
@@ -184,7 +227,7 @@ impl Application {
             }) {
                 Ok(join) => {
                     println!("Worker thread #{} started", i);
-                    self.worker.push(Arc::new(join));
+                    self.task.worker.push(Arc::new(join));
                 }
                 Err(err) => {
                     println!("Couldn't spawn thread: {}", err);
@@ -194,45 +237,47 @@ impl Application {
     }
 
     pub fn finished(&mut self) -> bool {
-        for thread in &self.worker {
+        for thread in &self.task.worker {
             if !thread.is_finished() {
                 return false;
             }
         }
 
-        let _ = &self.worker.clear();
-        *self.stopping.lock().unwrap() = false;
-        self.speeds.lock().unwrap().clear();
+        let _ = &self.task.worker.clear();
+        *self.task.stopping.lock().unwrap() = false;
+        self.task.speeds.lock().unwrap().clear();
 
         true
     }
 
     pub fn stop(&mut self) {
-        *self.stopping.lock().unwrap() = true;
+        *self.task.stopping.lock().unwrap() = true;
     }
 
     pub fn is_stopping(&self) -> bool {
-        *self.stopping.lock().unwrap()
+        *self.task.stopping.lock().unwrap()
     }
 
     pub fn is_running(&self) -> bool {
-        !&self.worker.is_empty()
+        !&self.task.worker.is_empty()
     }
 
-    pub fn results(&self) -> Vec<HashResult> {
-        self.hashs.lock().unwrap().to_vec()
+    pub fn results(&self) -> Vec<IterationResult> {
+        self.task.hashs.lock().unwrap().to_vec()
     }
 
     pub fn clear_results(&mut self) {
-        self.hashs.lock().unwrap().clear();
+        self.task.hashs.lock().unwrap().clear();
     }
 
     pub fn get_speeds(&self) -> HashMap<usize, u64> {
-        self.speeds.lock().unwrap().to_owned()
+        self.task.speeds.lock().unwrap().to_owned()
     }
 }
 
 fn main() {
     let app = Arc::new(Mutex::new(Application::default()));
+    //init_opencl();
+
     let _ = ui::show(app.clone());
 }

@@ -1,6 +1,5 @@
 use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
+    sync::{Arc, Mutex}
 };
 
 use egui::{panel::Side, Button, Color32, ComboBox, DragValue, RichText, TextEdit};
@@ -103,6 +102,7 @@ impl eframe::App for HashSherlockUI {
                         ui.selectable_value(&mut self.algorithm, HashAlgorithm::SHA256, "SHA-256");
                         ui.selectable_value(&mut self.algorithm, HashAlgorithm::SHA384, "SHA-384");
                         ui.selectable_value(&mut self.algorithm, HashAlgorithm::SHA512, "SHA-512");
+                        ui.selectable_value(&mut self.algorithm, HashAlgorithm::ED25519, "Ed25519");
                     });
 
                     ui.label("Nonce length");
