@@ -11,7 +11,7 @@ use crate::{Application, HashAlgorithm, visualizations::table::TableVisualizatio
 
 pub enum Visualization {
     Table,
-    Graph
+    _Graph
 }
 
 pub struct HashSherlockUI {
@@ -118,7 +118,7 @@ impl eframe::App for HashSherlockUI {
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         if app.is_running() {
-                            if app.is_stopping() {
+                            if app.is_stopping().to_owned() {
                                 ui.add_enabled(false, Button::new("Stopping ..."));
                             } else {
                                 if ui.button("Stop").clicked() {

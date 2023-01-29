@@ -24,16 +24,15 @@
 
 use std::{
     fmt::{Display, Formatter, Result},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     thread::{self, JoinHandle},
-    time::SystemTime,
+    time::SystemTime
 };
 
 use base64::{engine::general_purpose, Engine as _};
 use chrono::Utc;
 use ed25519_dalek::PublicKey;
 use eframe::epaint::ahash::{HashMap, HashMapExt};
-use opencl::init_opencl;
 use rand::{distributions::Alphanumeric, Rng, RngCore};
 use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY, SHA256, SHA384, SHA512};
 
@@ -76,16 +75,36 @@ impl Display for HashAlgorithm {
     }
 }
 
-#[derive(Debug, Clone)]
+trait Stopping: Sync + Send {
+    fn get_status(&self) -> &bool;
+    fn set_status(&mut self, new: bool);
+}
+
+#[derive(Debug)]
+struct StoppingStatus {
+    status: bool
+}
+
+impl Stopping for StoppingStatus {
+    fn get_status(&self) -> &bool {
+        &self.status
+    }
+
+    fn set_status(&mut self, new: bool) {
+        self.status = new;
+    }
+}
+
+#[derive(Debug)]
 pub struct Task {
     pub worker: Vec<Arc<JoinHandle<()>>>,
     pub hashs: Arc<Mutex<Vec<IterationResult>>>,
     pub speeds: Arc<Mutex<HashMap<usize, u64>>>,
-    pub stopping: Arc<Mutex<bool>>,
+    pub stopping: Arc<RwLock<bool>>,
     pub current_algorithm: Option<HashAlgorithm>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Application {
     pub target_beginning: String,
     pub nonce_length: usize,
@@ -102,7 +121,7 @@ impl Default for Application {
                 worker: Vec::new(),
                 hashs: Arc::new(Mutex::new(Vec::new())),
                 speeds: Arc::new(Mutex::new(HashMap::new())),
-                stopping: Arc::new(Mutex::new(false)),
+                stopping: Arc::new(RwLock::new(false)),
                 current_algorithm: None,
             },
         }
@@ -147,7 +166,7 @@ impl Application {
                 let mut rng = rand::thread_rng();
 
                 loop {
-                    if *stopping_clone.lock().unwrap() {
+                    if *stopping_clone.read().unwrap() {
                         break;
                     }
 
@@ -222,8 +241,6 @@ impl Application {
                         })
                     }
                 }
-
-                println!("Thread #{} finished", i);
             }) {
                 Ok(join) => {
                     println!("Worker thread #{} started", i);
@@ -244,18 +261,18 @@ impl Application {
         }
 
         let _ = &self.task.worker.clear();
-        *self.task.stopping.lock().unwrap() = false;
+        *self.task.stopping.write().unwrap() = false;
         self.task.speeds.lock().unwrap().clear();
 
         true
     }
 
     pub fn stop(&mut self) {
-        *self.task.stopping.lock().unwrap() = true;
+        *self.task.stopping.write().unwrap() = true;
     }
 
     pub fn is_stopping(&self) -> bool {
-        *self.task.stopping.lock().unwrap()
+        *self.task.stopping.read().unwrap()
     }
 
     pub fn is_running(&self) -> bool {
