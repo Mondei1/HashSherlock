@@ -16,6 +16,7 @@
 /*************************** HEADER FILES ***************************/
 #include <stdlib.h>
 #include <memory.h>
+#include <curand_kernel.h>
 extern "C" {
 #include "sha256.cuh"
 }

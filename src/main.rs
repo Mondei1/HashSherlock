@@ -24,6 +24,7 @@
 
 use std::{
     fmt::{Display, Formatter, Result},
+    result,
     sync::{Arc, Mutex, RwLock},
     thread::{self, JoinHandle},
     time::SystemTime,
@@ -34,7 +35,7 @@ use chrono::Utc;
 use cuda::Cuda;
 use ed25519_dalek::PublicKey;
 use eframe::epaint::ahash::{HashMap, HashMapExt};
-use rand::{distributions::Alphanumeric, Rng, RngCore};
+use rand::{distributions::Alphanumeric, rngs::SmallRng, Rng, RngCore, SeedableRng};
 use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY, SHA256, SHA384, SHA512};
 
 mod cuda;
@@ -126,7 +127,7 @@ impl Default for Application {
 
 impl Application {
     pub fn start_worker(&mut self, algorithm: HashAlgorithm, device: Device) {
-        match (device) {
+        match device {
             Device::CPU => {
                 let thread_count = num_cpus::get();
                 println!(
@@ -155,7 +156,7 @@ impl Application {
                         let mut last_speed_check = SystemTime::now();
                         let mut last_speed_iteration: u64 = 0;
 
-                        let mut nonce: String = rand::thread_rng()
+                        let mut nonce: String = SmallRng::from_entropy()
                             .sample_iter(&Alphanumeric)
                             .take(nonce_length_clone)
                             .map(char::from)
@@ -252,12 +253,83 @@ impl Application {
                 }
             }
             Device::GPU => {
-                let job = Cuda::new().run_job(10_000_000, 12);
+                self.task.current_algorithm = Some(algorithm.clone());
 
-                match job {
-                    Ok(_) => {},
+                // We need to clone a lot of things. But we only copy the Arc (increasing reference coung)
+                // and not the actual value.
+                let hash_clone = self.task.hashs.clone();
+                let speeds_clone = self.task.speeds.clone();
+                let stopping_clone = self.task.stopping.clone();
+                let nonce_length_clone = self.nonce_length.clone();
+                let beginning_clone = self.target_beginning.clone();
+                let alg_clone = algorithm.clone();
+
+                let thread_builder =
+                    thread::Builder::new().name("Hash Sherlock GPU worker".to_string());
+
+                match thread_builder.spawn(move || {
+                    let mut iteration: u64 = 0;
+                    let mut last_speed_check = SystemTime::now();
+                    let mut last_speed_iteration: u64 = 0;
+
+                    let cuda = match Cuda::new() {
+                        Ok(c) => Some(c),
+                        Err(err) => {
+                            println!("Failed to initialize CUDA: {}", err);
+                            None
+                        }
+                    };
+    
+                    // CUDA is not available on this system.
+                    // TODO: Show message to user.
+                    if cuda.is_none() {
+                        return;
+                    }
+    
+                    let cuda_instance = cuda.unwrap();
+
+                    loop {
+                        if *stopping_clone.read().unwrap() {
+                            break;
+                        }
+
+                        // A second passed, lets update our speeds.
+                        if last_speed_check.elapsed().unwrap().as_millis() > 1000 {
+                            let mut sc = speeds_clone.lock().unwrap();
+
+                            sc.insert(0, iteration - last_speed_iteration);
+
+                            last_speed_check = SystemTime::now();
+                            last_speed_iteration = iteration;
+                        }
+
+                        if alg_clone == HashAlgorithm::SHA256 {
+                            match cuda_instance.run(50_000_000, nonce_length_clone, &beginning_clone)
+                            {
+                                Ok(results) => {
+                                    iteration += 10_000_000;
+                                    for result in results.iter() {
+                                        let mut r = result.clone();
+                                        r.iteration += iteration;
+                                        hash_clone.lock().unwrap().push(r);
+                                    }
+                                }
+                                Err(err) => {
+                                    println!("CUDA job failed: {}", err);
+                                }
+                            }
+                        } else {
+                            // Rest is not yet supported.
+                            return;
+                        }
+                    }
+                }) {
+                    Ok(join) => {
+                        println!("GPU worker thread started");
+                        self.task.worker.push(Arc::new(join));
+                    }
                     Err(err) => {
-                        println!("CUDA job failed: {}", err);
+                        println!("Couldn't spawn thread: {}", err);
                     }
                 }
             }
