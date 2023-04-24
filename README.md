@@ -13,7 +13,7 @@ Hash Sherlock utilizes all your available cores, generates some unique value (ca
 - Beginning of the hash (like `00000` at the start is considered "found")
 
 ## Is it fast?
-Depends on your hardware. Hash Sherlock will utilize all available cores. So your CPU will be used as much as possible. If you own a NVIDIA GPU (only tested on a 4070 Ti) you may be able to utilize the CUDA backend.
+Depends on your hardware. Hash Sherlock will utilize all available cores. So your CPU will be used as much as possible. If you own a NVIDIA GPU (only tested on a 3070 Ti) you may be able to utilize the CUDA backend.
 
 My **AMD Ryzen 9 5900X** with 12 physical cores and 24 logical cores with a clock speed of 4.8 GHz is able to perform **27,0 MH/s** (27,000,000 H/s). While this sounds fast, it's not. A **NVIDIA GeForce RTX 3090** may reach **2,864 MH/s** (for SHA-512: [source](https://openbenchmarking.org/test/pts/hashcat-1.0.0))
 
