@@ -26,17 +26,18 @@ use std::{
     fmt::{Display, Formatter, Result},
     sync::{Arc, Mutex, RwLock},
     thread::{self, JoinHandle},
-    time::SystemTime
+    time::SystemTime,
 };
 
 use base64::{engine::general_purpose, Engine as _};
 use chrono::Utc;
+use cuda::Cuda;
 use ed25519_dalek::PublicKey;
 use eframe::epaint::ahash::{HashMap, HashMapExt};
 use rand::{distributions::Alphanumeric, Rng, RngCore};
 use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY, SHA256, SHA384, SHA512};
 
-mod opencl;
+mod cuda;
 mod ui;
 mod visualizations;
 
@@ -75,23 +76,18 @@ impl Display for HashAlgorithm {
     }
 }
 
-trait Stopping: Sync + Send {
-    fn get_status(&self) -> &bool;
-    fn set_status(&mut self, new: bool);
+#[derive(Debug, Clone, PartialEq)]
+pub enum Device {
+    CPU,
+    GPU,
 }
 
-#[derive(Debug)]
-struct StoppingStatus {
-    status: bool
-}
-
-impl Stopping for StoppingStatus {
-    fn get_status(&self) -> &bool {
-        &self.status
-    }
-
-    fn set_status(&mut self, new: bool) {
-        self.status = new;
+impl Display for Device {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        match &self {
+            Device::CPU => write!(f, "CPU"),
+            Device::GPU => write!(f, "GPU"),
+        }
     }
 }
 
@@ -129,125 +125,140 @@ impl Default for Application {
 }
 
 impl Application {
-    pub fn start_worker(&mut self, algorithm: HashAlgorithm) {
-        let thread_count = num_cpus::get();
-        println!(
-            "Start guessing random hashes on {} threads ...",
-            thread_count
-        );
+    pub fn start_worker(&mut self, algorithm: HashAlgorithm, device: Device) {
+        match (device) {
+            Device::CPU => {
+                let thread_count = num_cpus::get();
+                println!(
+                    "Start guessing random hashes on {} threads ...",
+                    thread_count
+                );
 
-        self.task.current_algorithm = Some(algorithm.clone());
+                self.task.current_algorithm = Some(algorithm.clone());
 
-        for i in 0..thread_count {
-            let thread_builder =
-                thread::Builder::new().name(format!("Hash Sherlock worker #{}", i));
+                for i in 0..thread_count {
+                    let thread_builder =
+                        thread::Builder::new().name(format!("Hash Sherlock worker #{}", i));
 
-            // We need to clone a lot of things. But we only copy the Arc (increasing reference coung)
-            // and not the actual value.
-            let hash_clone = self.task.hashs.clone();
-            let speeds_clone = self.task.speeds.clone();
-            let stopping_clone = self.task.stopping.clone();
-            let nonce_length_clone = self.nonce_length.clone();
-            let beginning_clone = self.target_beginning.clone();
-            let alg_clone = algorithm.clone();
+                    // We need to clone a lot of things. But we only copy the Arc (increasing reference coung)
+                    // and not the actual value.
+                    let hash_clone = self.task.hashs.clone();
+                    let speeds_clone = self.task.speeds.clone();
+                    let stopping_clone = self.task.stopping.clone();
+                    let nonce_length_clone = self.nonce_length.clone();
+                    let beginning_clone = self.target_beginning.clone();
+                    let alg_clone = algorithm.clone();
 
-            match thread_builder.spawn(move || {
-                let mut iteration: u64 = 0;
-                let mut nonce_iteration: u32 = 0;
-                let mut last_speed_check = SystemTime::now();
-                let mut last_speed_iteration: u64 = 0;
+                    match thread_builder.spawn(move || {
+                        let mut iteration: u64 = 0;
+                        let mut nonce_iteration: u32 = 0;
+                        let mut last_speed_check = SystemTime::now();
+                        let mut last_speed_iteration: u64 = 0;
 
-                let mut nonce: String = rand::thread_rng()
-                    .sample_iter(&Alphanumeric)
-                    .take(nonce_length_clone)
-                    .map(char::from)
-                    .collect();
+                        let mut nonce: String = rand::thread_rng()
+                            .sample_iter(&Alphanumeric)
+                            .take(nonce_length_clone)
+                            .map(char::from)
+                            .collect();
 
-                let mut rng = rand::thread_rng();
+                        let mut rng = rand::thread_rng();
 
-                loop {
-                    if *stopping_clone.read().unwrap() {
-                        break;
-                    }
-
-                    // A second passed, lets update our speeds.
-                    if last_speed_check.elapsed().unwrap().as_millis() > 1000 {
-                        let mut sc = speeds_clone.lock().unwrap();
-
-                        sc.insert(i, iteration - last_speed_iteration);
-
-                        last_speed_check = SystemTime::now();
-                        last_speed_iteration = iteration;
-                    }
-
-                    iteration += 1;
-                    nonce_iteration += 1;
-
-                    let value = format!("{}{}", nonce, nonce_iteration);
-                    let hash: String;
-                    let mut private_key: Option<String> = None;
-
-                    if alg_clone == HashAlgorithm::ED25519 {
-                        let mut bytes = [0u8; 32];
-                        rng.fill_bytes(&mut bytes);
-
-                        let secret =
-                            ed25519_dalek::SecretKey::from_bytes(&bytes).expect("Invalid length");
-                        let public: PublicKey = (&secret).into();
-
-                        hash = general_purpose::STANDARD.encode(public.as_bytes());
-                        private_key = Some(general_purpose::STANDARD.encode(secret.as_bytes()));
-                    } else {
-                        // Only switch nonce after 1 million operations because generating a new nonce
-                        // for every operation is quite heavy. This gives us ~0,3 MH/s more.
-                        if nonce_iteration > 1_000_000 {
-                            nonce = rand::thread_rng()
-                                .sample_iter(&Alphanumeric)
-                                .take(nonce_length_clone)
-                                .map(char::from)
-                                .collect();
-
-                            nonce_iteration = 0;
-                        }
-
-                        let alg = match alg_clone {
-                            HashAlgorithm::SHA1 => &SHA1_FOR_LEGACY_USE_ONLY,
-                            HashAlgorithm::SHA256 => &SHA256,
-                            HashAlgorithm::SHA384 => &SHA384,
-                            HashAlgorithm::SHA512 => &SHA512,
-                            _ => {
-                                return;
+                        loop {
+                            if *stopping_clone.read().unwrap() {
+                                break;
                             }
-                        };
 
-                        let mut context = Context::new(alg);
+                            // A second passed, lets update our speeds.
+                            if last_speed_check.elapsed().unwrap().as_millis() > 1000 {
+                                let mut sc = speeds_clone.lock().unwrap();
 
-                        context.update(value.as_bytes());
+                                sc.insert(i, iteration - last_speed_iteration);
 
-                        let digest = context.clone().finish();
-                        let raw_result = digest.as_ref();
-                        hash = hex::encode(raw_result);
-                    }
+                                last_speed_check = SystemTime::now();
+                                last_speed_iteration = iteration;
+                            }
 
-                    if hash.starts_with(&beginning_clone) {
-                        println!("Thread (#{}): Found hash {}", i, hash);
-                        hash_clone.lock().unwrap().push(IterationResult {
-                            iteration,
-                            thread: i,
-                            value: hash,
-                            nonce: value,
-                            time: Utc::now(),
-                            private_key,
-                        })
+                            iteration += 1;
+                            nonce_iteration += 1;
+
+                            let value = format!("{}{}", nonce, nonce_iteration);
+                            let hash: String;
+                            let mut private_key: Option<String> = None;
+
+                            if alg_clone == HashAlgorithm::ED25519 {
+                                let mut bytes = [0u8; 32];
+                                rng.fill_bytes(&mut bytes);
+
+                                let secret = ed25519_dalek::SecretKey::from_bytes(&bytes)
+                                    .expect("Invalid length");
+                                let public: PublicKey = (&secret).into();
+
+                                hash = general_purpose::STANDARD.encode(public.as_bytes());
+                                private_key =
+                                    Some(general_purpose::STANDARD.encode(secret.as_bytes()));
+                            } else {
+                                // Only switch nonce after 1 million operations because generating a new nonce
+                                // for every operation is quite heavy. This gives us ~0,3 MH/s more.
+                                if nonce_iteration > 1_000_000 {
+                                    nonce = rand::thread_rng()
+                                        .sample_iter(&Alphanumeric)
+                                        .take(nonce_length_clone)
+                                        .map(char::from)
+                                        .collect();
+
+                                    nonce_iteration = 0;
+                                }
+
+                                let alg = match alg_clone {
+                                    HashAlgorithm::SHA1 => &SHA1_FOR_LEGACY_USE_ONLY,
+                                    HashAlgorithm::SHA256 => &SHA256,
+                                    HashAlgorithm::SHA384 => &SHA384,
+                                    HashAlgorithm::SHA512 => &SHA512,
+                                    _ => {
+                                        return;
+                                    }
+                                };
+
+                                let mut context = Context::new(alg);
+
+                                context.update(value.as_bytes());
+
+                                let digest = context.clone().finish();
+                                let raw_result = digest.as_ref();
+                                hash = hex::encode(raw_result);
+                            }
+
+                            if hash.starts_with(&beginning_clone) {
+                                println!("Thread (#{}): Found hash {}", i, hash);
+                                hash_clone.lock().unwrap().push(IterationResult {
+                                    iteration,
+                                    thread: i,
+                                    value: hash,
+                                    nonce: value,
+                                    time: Utc::now(),
+                                    private_key,
+                                })
+                            }
+                        }
+                    }) {
+                        Ok(join) => {
+                            println!("Worker thread #{} started", i);
+                            self.task.worker.push(Arc::new(join));
+                        }
+                        Err(err) => {
+                            println!("Couldn't spawn thread: {}", err);
+                        }
                     }
                 }
-            }) {
-                Ok(join) => {
-                    println!("Worker thread #{} started", i);
-                    self.task.worker.push(Arc::new(join));
-                }
-                Err(err) => {
-                    println!("Couldn't spawn thread: {}", err);
+            }
+            Device::GPU => {
+                let job = Cuda::new().run_job(10_000_000, 12);
+
+                match job {
+                    Ok(_) => {},
+                    Err(err) => {
+                        println!("CUDA job failed: {}", err);
+                    }
                 }
             }
         }

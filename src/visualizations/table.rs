@@ -89,8 +89,8 @@ impl<'a> TableVisualization<'a> {
                                             .text_style(TextStyle::Monospace);
     
                                         if ui.label(monospace_nonce).hovered() {
-                                            let mut clipboard: ClipboardContext = ClipboardProvider::new().unwrap();
-                                            let _ = clipboard.set_contents(private).unwrap();
+                                            //let mut clipboard: ClipboardContext = ClipboardProvider::new().unwrap();
+                                            //let _ = clipboard.set_contents(private).unwrap();
                                         }
                                     });
                                 } else {    

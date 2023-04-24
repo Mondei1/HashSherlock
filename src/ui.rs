@@ -7,7 +7,7 @@ use egui_extras::{Column, TableBuilder};
 use num_format::{Locale, ToFormattedString};
 use sysinfo::{System, SystemExt, CpuExt};
 
-use crate::{Application, HashAlgorithm, visualizations::table::TableVisualization};
+use crate::{Application, HashAlgorithm, visualizations::table::TableVisualization, Device};
 
 pub enum Visualization {
     Table,
@@ -17,6 +17,7 @@ pub enum Visualization {
 pub struct HashSherlockUI {
     application: Arc<Mutex<Application>>,
     algorithm: HashAlgorithm,
+    device: Device,
     cpu_name: String,
     cpu_freq: u64,
     visualization: Visualization
@@ -27,6 +28,7 @@ impl HashSherlockUI {
         Self {
             application,
             algorithm: HashAlgorithm::SHA256,
+            device: Device::CPU,
             cpu_name,
             cpu_freq,
             visualization: Visualization::Table
@@ -94,8 +96,16 @@ impl eframe::App for HashSherlockUI {
                         ui.add(edit);
                     });
 
+                    ui.label("Choose device");
+                    ComboBox::from_id_source("device")
+                    .selected_text(format!("{}", self.device))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.device, Device::CPU, "CPU");
+                        ui.selectable_value(&mut self.device, Device::GPU, "GPU (NVIDIA only)");
+                    });
+
                     ui.label("Choose algorithm");
-                    ComboBox::from_label("")
+                    ComboBox::from_id_source("algorithm")
                     .selected_text(format!("{}", self.algorithm))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.algorithm, HashAlgorithm::SHA1, "SHA-1 (insecure)");
@@ -127,7 +137,7 @@ impl eframe::App for HashSherlockUI {
                             }
                         } else {
                             if ui.button("Run").clicked() {
-                                app.start_worker(self.algorithm.clone());
+                                app.start_worker(self.algorithm.clone(), self.device.clone());
                             }
                         }
 
